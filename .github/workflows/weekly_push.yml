@@ -1,0 +1,36 @@
+name: 每周五分钟作文素材推送
+
+on:
+  # 定时任务：UTC 12:20 = 北京时间 20:20，星期 5 = 每周五
+  schedule:
+    - cron: "20 12 * * 5"
+  # 允许在网页上手动点一下按钮就立刻运行一次（用来测试，不用等周五）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  push-essay-material:
+    name: 生成并推送作文素材
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 把代码下载到运行环境
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖（只有 requests 一个）
+        run: pip install -r requirements.txt
+
+      - name: 调用 DeepSeek 生成素材，并用 WxPusher 推送
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+        run: python main.py
