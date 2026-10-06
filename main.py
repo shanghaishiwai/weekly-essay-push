@@ -3,18 +3,19 @@
 """
 每周五 20:20（北京时间）自动执行：
 1. 调用 DeepSeek API 生成一段高考作文素材
-2. 通过 WxPusher 推送到微信
+2. 推送到微信（PushPlus 微信公众号渠道）
 
-自动识别两种推送方式，你不用关心自己配的是哪种：
-  · 极简推送：WXPUSHER_SPT = SPT_ 开头的令牌
-  · 标准推送：WXPUSHER_APPTOKEN = AT_ 开头的令牌（UID 会自动查询）
+支持的推送通道（自动识别，哪个配了用哪个）：
+  · PushPlus（推荐，能进微信）：PUSHPLUS_TOKEN
+  · WxPusher 标准推送：WXPUSHER_SPT / WXPUSHER_APPTOKEN（AT_ 开头，UID 自动查）
+  · WxPusher 极简推送：WXPUSHER_SPT（SPT_ 开头）
 
 必需的环境变量（在 GitHub Secrets 里配置）：
   DEEPSEEK_API_KEY  DeepSeek 的 API Key（sk- 开头）
-  以及上面两种推送令牌中的任意一种
+  以及上面任意一种推送令牌
 可选：
   DEEPSEEK_MODEL    默认 deepseek-chat
-  WXPUSHER_UID      标准推送的收件人；不填会自动查询
+  WXPUSHER_UID      WxPusher 标准推送的收件人；不填会自动查询
 """
 
 import os
@@ -28,6 +29,9 @@ import requests
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
 
+# PushPlus（推送加）—— 微信公众号渠道，当前主力通道
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+
 WXPUSHER_URL = "https://wxpusher.zjiecode.com/api/send/message/simple-push"
 
 # 标准推送（appToken 令牌）
@@ -35,10 +39,11 @@ WXPUSHER_STD_URL = "https://wxpusher.zjiecode.com/api/send/message"
 # 标准推送：查询"谁关注了应用"（用来自动获取 UID）
 WXPUSHER_USERS_URL = "https://wxpusher.zjiecode.com/api/fun/wxuser/v2"
 
-# WxPusher 单条消息有长度上限（约 4000 字符），超过就自动拆成多条发送
+# 单条消息长度上限，超过就自动拆成多条发送
 WXPUSHER_MAX_LEN = 3500
 
 # Secrets 可能用的名字（哪个有值就用哪个，兼容你随手起的名字）
+PUSHPLUS_NAMES = ["PUSHPLUS_TOKEN", "PUSHPLUS", "PUSH_PLUS_TOKEN"]
 SPT_NAMES = ["WXPUSHER_SPT", "WXPUSHER_TOKEN"]
 APPTOKEN_NAMES = ["WXPUSHER_APPTOKEN", "APPTOKEN", "WXPUSHER_APP_TOKEN"]
 UID_NAMES = ["WXPUSHER_UID", "UID"]
@@ -169,7 +174,7 @@ def first_env(names):
 def describe_all():
     """把当前配置情况完整打印出来，方便排查（不打印完整令牌）。"""
     log("下载到本机的 Secrets 情况：")
-    for n in SPT_NAMES + APPTOKEN_NAMES + UID_NAMES:
+    for n in PUSHPLUS_NAMES + SPT_NAMES + APPTOKEN_NAMES + UID_NAMES:
         v = (os.environ.get(n) or "").strip()
         if v:
             log(f"   ✅ {n}：长度 {len(v)}，开头 {v[:4]!r}")
@@ -179,9 +184,14 @@ def describe_all():
 
 def resolve_push_channel():
     """判断该用哪种推送方式，返回 (方式, 令牌名, 令牌, uid)。"""
+    pp_name, pp = first_env(PUSHPLUS_NAMES)
     spt_name, spt = first_env(SPT_NAMES)
     at_name, at = first_env(APPTOKEN_NAMES)
     uid_name, uid = first_env(UID_NAMES)
+
+    # PushPlus 优先（它现在能真正进微信）
+    if pp and len(pp) >= 20 and not pp.startswith(("AT_", "SPT_")):
+        return "pushplus", pp_name, pp, None
 
     # 优先看令牌本身长什么样，比名字更可靠
     if at and at.startswith("AT_"):
@@ -234,6 +244,42 @@ def auto_fetch_uid(app_token: str):
     except Exception as exc:  # noqa: BLE001
         log(f"⚠️ 查询 UID 失败：{exc}")
     return None
+
+
+def push_via_pushplus(token: str, content: str) -> None:
+    """通过 PushPlus 推送到微信（当前主力通道）。"""
+    title = "本周高考作文素材 " + time.strftime("%m-%d")
+    chunks = split_for_wxpusher(content)
+    total = len(chunks)
+
+    for index, chunk in enumerate(chunks, start=1):
+        body = chunk if total == 1 else f"（第 {index}/{total} 部分）\n{chunk}"
+        payload = {
+            "token": token,
+            "title": title,
+            "content": body,
+            "template": "txt",
+            "channel": "wechat",
+        }
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                log(f"正在通过 PushPlus 推送第 {index}/{total} 条（第 {attempt} 次尝试）…")
+                resp = requests.post(PUSHPLUS_URL, json=payload, timeout=60)
+                result = resp.json()
+                if resp.status_code == 200 and result.get("code") == 200:
+                    log(f"✅ PushPlus 已受理第 {index}/{total} 条，流水号 {result.get('data')}")
+                    last_error = None
+                    break
+                raise RuntimeError(f"PushPlus 返回异常：{result}")
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                log(f"⚠️ 第 {attempt} 次失败：{exc}")
+                if attempt < 3:
+                    time.sleep(5 * attempt)
+        if last_error is not None:
+            log(f"❌ PushPlus 第 {index}/{total} 条推送失败：{last_error}")
+            sys.exit(1)
 
 
 def push_to_wechat(mode: str, token: str, content: str, uid=None) -> None:
@@ -295,12 +341,14 @@ def main() -> None:
     mode, token_name, token, uid = resolve_push_channel()
     if not mode:
         log("❌ 没能确定推送方式：请在 GitHub Secrets 里配置以下任意一组")
-        log("   方案A（极简推送）：WXPUSHER_SPT = SPT_ 开头的令牌")
-        log("   方案B（标准推送）：WXPUSHER_APPTOKEN = AT_ 开头的令牌，"
-            "并在同一应用的关注用户里能查到 UID")
+        log("   方案A（推荐，能进微信）：PUSHPLUS_TOKEN = PushPlus 的 token")
+        log("   方案B（WxPusher 客户端）：WXPUSHER_SPT = AT_ 或 SPT_ 开头的令牌")
         sys.exit(1)
-    log(f"✅ 推送方式：{'极简推送(SPT)' if mode == 'spt' else '标准推送(appToken)'}"
-        f"，令牌来源：{token_name}" + (f"，收件 UID：{uid}" if uid else ""))
+    mode_label = {"pushplus": "PushPlus（微信公众号）",
+                  "spt": "WxPusher 极简推送",
+                  "standard": "WxPusher 标准推送"}.get(mode, mode)
+    log(f"✅ 推送方式：{mode_label}，令牌来源：{token_name}"
+        + (f"，收件 UID：{uid}" if uid else ""))
 
     material = generate_material(api_key, model)
     log("生成的素材内容如下：")
@@ -308,7 +356,10 @@ def main() -> None:
     print(material, flush=True)
     print("-" * 40, flush=True)
 
-    push_to_wechat(mode, token, material, uid)
+    if mode == "pushplus":
+        push_via_pushplus(token, material)
+    else:
+        push_to_wechat(mode, token, material, uid)
     log("=== 全部完成，微信应该已经收到了 ===")
 
 
