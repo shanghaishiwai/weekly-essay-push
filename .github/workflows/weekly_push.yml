@@ -48,6 +48,7 @@ jobs:
       - name: 调用 DeepSeek 生成素材，并用 WxPusher 推送
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
         run: python main.py
