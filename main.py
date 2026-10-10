@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-每周作文素材自动推送（v3 —— 高分论据版）
+每周作文论据自动推送（v3.1 —— 轮换 + 古典专场版）
 
-v3 相对 v2 的关键调整：
-  · 选人标准从"越冷门越好"改成【说服力 × 熟悉度 × 时效性】三维打分。
-    既不选爱迪生这种被写烂的，也不选没人听过的——目标区间是
-    "叫得响但没被作文素材书写烂"的当代人物（如大疆汪滔、蔡磊这类量级）。
-  · 输出升级为【论据卡】：新增【论据价值】和【论证链示例】，
-    学生可以照着"论据 → 论证 → 应用 → 升级写法"直接套用。
+v3.1 相对 v3 的调整：
+  · 领域不固定：内置 20 个领域池，按历史记录强制轮换，尽量不重复。
+  · 题材也轮换：内置 20 个"关系型"题材池，并绑定当前高考命题方向
+    （重思辨轻叙事、重"我"的位置、重时代感与现实关怀）。
+  · 偶尔来点古人：每 5 期安排一次「古典专场」（王阳明、徐霞客、沈括…），
+    要求挑选"今天仍有讨论价值、有具体行迹、有辩证张力"的古人，
+    而不是写成古人美德故事。
   · 保留 v2 的反重复机制（history.json + 程序级校验）和永久黑名单。
+
+数据流：history.json 记录每期的 人物 / 领域 / 题材 / 日期，
+下一期据此排除人物、轮换领域与题材，并判断该走当代还是古典路线。
 
 推送通道：PushPlus（微信公众号）
 """
@@ -49,14 +53,57 @@ MAX_TOKENS_STAGE2 = 1400   # 第二阶段（成文）token 上限
 
 CN_TZ = timezone(timedelta(hours=8))
 
-# ---------------- 人物可感知度参考（给模型当标尺，不是硬性白名单）----------------
-# 说明：这些是"认知度够高、又不像爱迪生那样被写烂"的当代人物，供模型类比参考
+# ---------------- 轮换机制参数 ----------------
+# 每 CLASSIC_EVERY 周安排一次"古典专场"，其余周走当代路线
+CLASSIC_EVERY = 5
+
+# ---------------- 人物可感知度参考（当代）----------------
 FRESH_AND_KNOWN = [
-    "大疆 汪滔", "渐冻症 蔡磊", "宇树科技 王兴兴", "DeepSeek 梁文锋",
-    "《黑神话·悟空》冯骥", "嫦娥团队 青年工程师", "北斗 谢军",
-    "张伟丽", "郑钦文", "潘展乐", "江梦南", "刘秀祥",
-    "曹原", "颜宁", "王亚平", "徐立平", "南仁东", "黄大年",
-    "陈立群", "张定宇", "汪品先", "叶聪", "张荣桥",
+    "大疆 汪滔", "宇树科技 王兴兴", "DeepSeek 梁文锋", "《黑神话·悟空》冯骥",
+    "嫦娥团队 青年工程师", "北斗 谢军", "张伟丽", "郑钦文", "潘展乐",
+    "江梦南", "刘秀祥", "曹原", "颜宁", "王亚平", "徐立平",
+    "南仁东", "黄大年", "陈立群", "张定宇", "汪品先", "叶聪", "张荣桥",
+]
+
+# ---------------- 古典人物池（每几周用一次，替代"当代优先"）----------------
+# 挑选标准：认知度高、但没被作文素材书写烂的古代人物
+# 王阳明是其中最常用的一位；其余作为同量级备选
+CLASSIC_FIGURES = [
+    "王阳明", "徐霞客", "沈括", "宋应星", "徐光启", "李时珍",
+    "郦道元", "郭守敬", "祖冲之", "张衡", "墨子", "荀子",
+    "韩非", "范仲淹", "欧阳修", "李清照", "辛弃疾", "文天祥",
+    "顾炎武", "黄宗羲", "王夫之", "戴震", "焦循", "郑板桥",
+]
+
+# ---------------- 领域池（强制轮换，避免连续同领域）----------------
+FIELD_POOL = [
+    "科技创业", "基础科学", "医学与公共卫生", "航天与深空探索",
+    "工程与制造", "文学与写作", "艺术与设计", "教育与乡村",
+    "体育竞技", "生态与环保", "农业与种业", "公益与志愿",
+    "法律与正义", "考古与文保", "海洋与极地", "数学与计算",
+    "材料与能源", "传媒与公共表达", "商业与产业升级", "手工艺与非遗",
+]
+
+# ---------------- 高考命题方向参考（对齐当前趋势，不写成套话）----------------
+EXAM_TRENDS = """当前高考作文命题的三个明显倾向（选人时要往这些方向靠）：
+
+1. **重思辨、轻叙事**：题目越来越喜欢"关系型"命题（如"快与慢""有用与无用"
+   "自我与时代""变与不变""内卷与突围"），要求学生做辩证分析，而不是讲一个感人故事。
+   所以人物的价值在于**能撑起一个判断**，而不是事迹本身多感人。
+
+2. **重"我"的位置**：常问"作为青年，你如何看待/选择"，人物要能引到学生自身的处境，
+   比如专业选择、内卷焦虑、长期主义、技术变革中的个人。
+
+3. **重时代感与现实关怀**：科技伦理（AI、基因）、生态、文化自信、乡村振兴、
+   老龄化、心理健康等时代议题频繁出现。人物的选择最好能回应当下的真实问题。"""
+
+# ---------------- 适配题材池（用于轮换，避免每周都写同一类题材）----------------
+TOPIC_POOL = [
+    "选择与坚守", "长期主义", "破界与跨界", "个人与时代",
+    "有用与无用", "快与慢", "自省与成长", "传承与创新",
+    "困境与突围", "工匠精神", "科技与人文", "平凡与不凡",
+    "知与行", "舍与得", "内卷与破局", "视野与格局",
+    "勇气与代价", "孤独与专注", "责任与自由", "传统与现代",
 ]
 
 # ---------------- 提示词（第一阶段：自己选人）----------------
@@ -66,50 +113,56 @@ STAGE1_SYSTEM = """你是一位带过 20 届高三的作文教研员，专门为
 1. 【说服力第一】这个人的事迹必须能**有力地证明一个观点**。学生抄上去，阅卷老师会觉得"这个论据真贴切"。
 2. 【认知度第二】读者要**认识或至少不排斥**这个人。用一个人尽皆知的名字写不出新意，
    但用一个没人听过的名字，阅卷老师会觉得学生在硬凑——这是减分项，不是加分项。
-   理想区间是：**在新闻/科技/文化圈叫得响，普通人也有印象，但还没被作文素材书写烂**。
+   理想区间是：**在大众视野里叫得响，但还没被作文素材书写烂**。
 3. 【真实第三】只写可查证的客观事实，不编造、不夸大、不张冠李戴。
 
-你要主动避开的（两类）：
-· 被写滥的（爱迪生、居里夫人、司马迁、苏轼、袁隆平、钟南山、张桂梅、樊锦诗、苏炳添…）
-  —— 阅卷老师已经看吐了，写上去不加分反而减分。
-· 太偏门的（只有专业圈知道、近三十年没有公开报道、没有可查证细节的人）
-  —— 学生写了老师不认识，说服力归零。"""
+你要主动避开的：
+· 被写滥的（爱迪生、居里夫人、司马迁、苏轼、屈原、袁隆平、钟南山、张桂梅、
+  樊锦诗、苏炳添…）—— 阅卷老师已经看吐了，写上去不加分反而减分。
+· 太偏门的（只有专业圈知道、没有任何可查证细节的人）—— 写了老师不认识，说服力归零。"""
 
 STAGE1_USER_TMPL = """任务：为高考作文挑选【1 位】论据人物，并给出选择理由。
+
+{route_note}
 
 【本周禁区】以下人物写过或写滥了，不能再选：
 {ban_list}
 
-【认知度参考】下面这类人物是"叫得响但没被写烂"的示范，你可以照这个感觉找同类型的人
-（不要直接选这些，而是找同等量级、同等新鲜度的人）：
+【认知度参考】下面这类人物是"叫得响但没被写烂"的示范感觉（本轮不要直接选这些，
+而是找同等量级、同等新鲜度的人）：
 {fresh_ref}
 
-【怎么选】先在脑子里列 4 位候选，按下表的三个维度打分淘汰，最后只留 1 位。
+【领域轮换】本周请优先从这些还没写过的领域里选：
+{field_hint}
 
-评估维度（每项 1-10 分）：
+【题材轮换】本周请优先覆盖这些还没写过的适配题材：
+{topic_hint}
+
+【命题方向】{exam_trends}
+
+【怎么选】先在脑子里列 4 位候选，按下表三个维度打分淘汰，最后只留 1 位。
 
 | 维度 | 含义 | 打分标准 |
 |---|---|---|
 | **说服力** | 事迹能否有力证明某个观点 | 10 分 = 事迹与观点咬合极紧，学生抄上去立刻加分 |
-| **熟悉度** | 读者对这个名字的认知程度 | 10 分 = 家喻户晓；7-8 分 = 新闻/科技圈知名、普通人有印象（**最佳区间**）；≤4 分 = 太冷门（**扣分项**） |
-| **时效性** | 是否为当代人物、近十年仍有公开动态 | 10 分 = 近年活跃；≤4 分 = 几十年前的历史人物 |
+| **认知度** | 读者对这个名字的认知程度 | 10 分 = 家喻户晓；7-8 分 = 大众有印象但没被写烂（**最佳区间**）；≤4 分 = 太冷门（**扣分项**） |
+| **时效性** | 与当下时代的关联度 | 10 分 = 近年活跃、契合时代议题；古典人物按"当代讨论热度+议题相关性"打分，不必刻意压低 |
 
 硬性要求：
-· 优先**当代、可感知**的人物：企业家、科学家、运动员、医生、技术工作者、创业者、
-  公益人物等；观众"身边不远"的真实人物。
-· 如果候选人是已故的历史人物，**直接淘汰**（除非他近十年仍被高频讨论且属于上述禁区之外）。
-· 领域尽量和禁区里最近出现过的不同（轮换：科技/商业、医学、体育、科学、文化、公益、教育…）。
+· 领域必须和禁区里最近出现过的**不同**。
+· 事迹必须能对应到【命题方向】里说的"关系型思辨"，而不是单纯的感人故事。
 
 【输出格式】只输出下面这个 JSON，不要任何多余文字、不要 markdown 代码块：
 {{
   "candidates": [
-    {{"name": "候选1姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "why": "一句话理由"}},
-    {{"name": "候选2姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "why": "一句话理由"}},
-    {{"name": "候选3姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "why": "一句话理由"}},
-    {{"name": "候选4姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "why": "一句话理由"}}
+    {{"name": "候选1姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "topic": "适配题材", "why": "一句话理由"}},
+    {{"name": "候选2姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "topic": "适配题材", "why": "一句话理由"}},
+    {{"name": "候选3姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "topic": "适配题材", "why": "一句话理由"}},
+    {{"name": "候选4姓名", "field": "领域", "persuasive": 1到10, "familiar": 1到10, "recent": 1到10, "topic": "适配题材", "why": "一句话理由"}}
   ],
   "picked": "最终选中的姓名（必须是候选之一）",
   "field": "最终人物所属领域",
+  "topic": "最终适配题材（一句话，如"长期主义""有用与无用"）",
   "total_score": 选中者的三项分数之和,
   "reject_reason": "为什么淘汰了另外几位（要说清是太老套、太冷门、还是说服力不够）"
 }}"""
@@ -302,6 +355,55 @@ def build_fresh_ref() -> str:
     return "、".join(FRESH_AND_KNOWN)
 
 
+def get_rotation(history: list) -> dict:
+    """根据历史记录算出本轮该走哪条路线、该避开哪些领域和题材。"""
+    count = len(history)
+    # 每 CLASSIC_EVERY 周走一次古典专场（第 5、10、15…次运行时触发）
+    is_classic = (count > 0) and (count % CLASSIC_EVERY == CLASSIC_EVERY - 1)
+
+    recent = history[-12:]
+    used_fields = [h.get("field", "") for h in recent if h.get("field")]
+    used_topics = [h.get("topic", "") for h in recent if h.get("topic")]
+
+    # 领域：优先给还没用过的，用完则给最久没用过的
+    fresh_fields = [f for f in FIELD_POOL if not any(f in uf or uf in f for uf in used_fields)]
+    field_hint = (fresh_fields if fresh_fields else
+                  [f for f in FIELD_POOL if f not in used_fields[-5:]])[:8]
+
+    fresh_topics = [t for t in TOPIC_POOL if t not in used_topics]
+    topic_hint = (fresh_topics if fresh_topics else TOPIC_POOL)[:8]
+
+    return {
+        "is_classic": is_classic,
+        "count": count,
+        "field_hint": "、".join(field_hint) if field_hint else "（领域已基本覆盖，自由选择）",
+        "topic_hint": "、".join(topic_hint),
+        "used_fields": used_fields,
+        "used_topics": used_topics,
+    }
+
+
+def build_route_note(rot: dict) -> str:
+    """构造本轮路线说明，注入提示词。"""
+    if rot["is_classic"]:
+        pool = "、".join(CLASSIC_FIGURES[:14])
+        return (
+            "【本轮是「古典专场」】\n"
+            f"这一轮请从中国古代人物里选 1 位（建议优先考虑这类：{pool} 等）。\n"
+            "注意：古典人物最怕写成古人美德故事。选人时要挑那种今天仍有讨论价值的人：\n"
+            "· 他的选择能回应当下的真实困惑（比如内卷与破局、有用与无用、知与行）\n"
+            "· 他有具体的、可查证的行迹（走过哪些路、写过什么书、做过什么决定），\n"
+            "  而不是只有淡泊名利、忧国忧民这类空标签\n"
+            "· 他的思想最好有可以被辩证讨论的张力（不是单向度的完人）"
+        )
+    return (
+        "【本轮是「当代专场」】\n"
+        "请从当代人物里选（在世的、或有近期公开动态的）：企业家、科学家、医生、\n"
+        "运动员、工程师、艺术家、公益人物、技术工作者等。\n"
+        "要求是大众有印象、但还没被作文素材书写烂的人。"
+    )
+
+
 # ---------------- DeepSeek 调用 ----------------
 def call_deepseek(api_key: str, model: str, messages: list,
                   temperature: float, max_tokens: int) -> str:
@@ -354,28 +456,36 @@ def parse_json_loose(text: str):
 
 
 # ---------------- 两阶段生成 ----------------
-def pick_figure(api_key: str, model: str, ban_list: str) -> dict:
-    """第一阶段：让模型按"说服力×熟悉度×时效性"评估候选，选出最合适的人。"""
-    log("【第一阶段】让模型自己列候选，按 说服力/熟悉度/时效性 三维打分…")
+def pick_figure(api_key: str, model: str, ban_list: str, rot: dict) -> dict:
+    """第一阶段：让模型按"说服力×认知度×时效性"评估候选，选出最合适的人。"""
+    route_note = build_route_note(rot)
+    route_label = "古典专场" if rot["is_classic"] else "当代专场"
+    log(f"【第一阶段】路线：{route_label}｜让模型列候选并按 说服力/认知度/时效性 三维打分…")
     content = call_deepseek(
         api_key, model,
         [{"role": "system", "content": STAGE1_SYSTEM},
          {"role": "user", "content": STAGE1_USER_TMPL.format(
-             ban_list=ban_list, fresh_ref=build_fresh_ref())}],
+             route_note=route_note,
+             ban_list=ban_list,
+             fresh_ref=build_fresh_ref(),
+             field_hint=rot["field_hint"],
+             topic_hint=rot["topic_hint"],
+             exam_trends=EXAM_TRENDS)}],
         temperature=1.3, max_tokens=MAX_TOKENS_STAGE1,
     )
     data = parse_json_loose(content)
     if not isinstance(data, dict) or not data.get("picked"):
         log("   ⚠️ 第一阶段返回格式异常，改用纯文本模式兜底")
-        return {"picked": None, "field": "", "candidates": [], "raw": content}
+        return {"picked": None, "field": "", "topic": "", "candidates": [], "raw": content}
 
     cands = data.get("candidates") or []
-    log(f"   候选 {len(cands)} 位，选中：{data.get('picked')}（领域：{data.get('field')}）")
+    log(f"   候选 {len(cands)} 位，选中：{data.get('picked')}"
+        f"（领域：{data.get('field')}｜题材：{data.get('topic')}）")
     for c in cands:
         if isinstance(c, dict):
-            log(f"      - {str(c.get('name')):<6} "
-                f"说服力={c.get('persuasive', '?')} 熟悉度={c.get('familiar', '?')} "
-                f"时效性={c.get('recent', '?')}  {c.get('why', '')}")
+            log(f"      - {str(c.get('name')):<8} "
+                f"说服力={c.get('persuasive', '?')} 认知度={c.get('familiar', '?')} "
+                f"时效性={c.get('recent', '?')}  [{c.get('topic', '')}]  {c.get('why', '')}")
     if data.get("total_score"):
         log(f"   选中者总分：{data['total_score']}")
     if data.get("reject_reason"):
@@ -429,7 +539,9 @@ def build_payload_text(card: str, meta: dict) -> str:
     """在素材卡前后加上说明，形成最终推送内容。"""
     header = (
         f"📚 本周作文论据 · {meta['date']}\n"
-        f"（{meta['field']}）\n"
+        f"（{meta['field']}"
+        + (f"｜{meta['topic']}" if meta.get("topic") else "")
+        + "）\n"
         "————————————\n"
     )
     footer = (
@@ -531,17 +643,28 @@ def main() -> None:
     history = load_history()
     ban_list = build_ban_list(history)
 
+    # 计算本轮路线（当代 / 古典）与轮换提示
+    rot = get_rotation(history)
+    route_label = "古典专场" if rot["is_classic"] else "当代专场"
+    log(f"本轮路线：{route_label}（已累计 {rot['count']} 期，每 {CLASSIC_EVERY} 期一次古典）")
+    log(f"领域轮换提示：{rot['field_hint'][:80]}")
+    log(f"题材轮换提示：{rot['topic_hint'][:80]}")
+    if rot["used_topics"]:
+        log(f"已用过的题材：{'、'.join(rot['used_topics'][-8:])}")
+
     # 两阶段生成 + 反重复校验
     meta = None
     card = None
     final_name = ""
     final_field = ""
+    final_topic = ""
 
     for attempt in range(1, GENERATE_ATTEMPTS + 1):
         log(f"—— 第 {attempt}/{GENERATE_ATTEMPTS} 轮生成 ——")
-        picked = pick_figure(api_key, model, ban_list)
+        picked = pick_figure(api_key, model, ban_list, rot)
         name = (picked.get("picked") or "").strip() or "（见正文）"
         field = (picked.get("field") or "").strip() or "未标注"
+        topic = (picked.get("topic") or "").strip()
 
         new_card = write_card(api_key, model, name, field)
 
@@ -556,15 +679,16 @@ def main() -> None:
             ban_list += f"\n· 刚刚你写过的（本次绝对不许再写）：{guessed}"
             continue
 
-        meta = {"name": guessed, "field": field, "date": now_str()}
+        meta = {"name": guessed, "field": field, "topic": topic, "date": now_str()}
         card = new_card
-        final_name, final_field = guessed, field
-        log(f"   ✅ 校验通过：{final_name} 是全新人物")
+        final_name, final_field, final_topic = guessed, field, topic
+        log(f"   ✅ 校验通过：{final_name} 是全新人物（领域：{field}｜题材：{topic or '未标注'}）")
         break
 
     if not card:
         log("⚠️ 多轮都撞车，用最后一轮结果兜底推送")
-        meta = {"name": final_name or "未知", "field": final_field or "未标注", "date": now_str()}
+        meta = {"name": final_name or "未知", "field": final_field or "未标注",
+                "topic": final_topic, "date": now_str()}
         card = new_card
 
     log("生成的素材卡：")
@@ -572,8 +696,9 @@ def main() -> None:
     print(card, flush=True)
     print("-" * 50, flush=True)
 
-    # 更新历史
-    history.append({"name": meta["name"], "field": meta["field"], "date": meta["date"]})
+    # 更新历史（记录人物 / 领域 / 题材，供下轮轮换）
+    history.append({"name": meta["name"], "field": meta["field"],
+                    "topic": meta.get("topic", ""), "date": meta["date"]})
     history = history[-HISTORY_KEEP:]
     save_history(history)
 
