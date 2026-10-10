@@ -523,7 +523,7 @@ def push_to_wxpusher(mode: str, token: str, content: str, uid=None) -> None:
 
 # ---------------- 主流程 ----------------
 def main() -> None:
-    log("=== 每周作文素材推送（v2 反重复版）开始 ===")
+    log("=== 每周作文论据推送（v3 高分论据版）开始 ===")
 
     api_key = get_env("DEEPSEEK_API_KEY")
     model = get_env("DEEPSEEK_MODEL", required=False) or DEFAULT_MODEL
