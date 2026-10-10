@@ -1,20 +1,21 @@
-name: 每周五分钟作文素材推送
+name: 每周作文素材推送
 
 on:
   # 定时任务：UTC 12:20 = 北京时间 20:20，星期 5 = 每周五
   schedule:
     - cron: "20 12 * * 5"
-  # 允许在网页上手动点一下按钮就立刻运行一次（用来测试，不用等周五）
+  # 允许手动触发，用于测试（不用等周五）
   workflow_dispatch:
 
+# 需要写权限：每次生成后要把用过的人物记进 history.json，实现"反重复"
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   push-essay-material:
     name: 生成并推送作文素材
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
       - name: 把代码下载到运行环境
@@ -28,27 +29,30 @@ jobs:
       - name: 安装依赖（只有 requests 一个）
         run: pip install -r requirements.txt
 
-      # ---- 体检步骤：判断 Secrets 里的令牌是哪种类型（不打印令牌内容）----
-      - name: 令牌体检
-        env:
-          WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
-          WXPUSHER_APPTOKEN: ${{ secrets.WXPUSHER_APPTOKEN }}
-          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
-          WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}
-          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
-          APPTOKEN: ${{ secrets.APPTOKEN }}
-          UID: ${{ secrets.UID }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          PYTHONIOENCODING: utf-8
-        run: |
-          # 让 GitHub 在日志里自动打码这串令牌
-          if [ -n "$WXPUSHER_SPT" ]; then echo "::add-mask::$WXPUSHER_SPT"; fi
-          echo "令牌已从 Secrets 取出（内容不会显示）"
-          python diagnose.py
-      - name: 调用 DeepSeek 生成素材，并用 WxPusher 推送
+      - name: 生成并推送作文素材
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+          WXPUSHER_APPTOKEN: ${{ secrets.WXPUSHER_APPTOKEN }}
+          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+          # 下面两个由 GitHub 自动提供，用于读写 history.json
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          PYTHONIOENCODING: utf-8
         run: python main.py
+
+      - name: 保存人物历史（用于下周排除）
+        if: always()
+        run: |
+          git config user.name "essay-bot"
+          git config user.email "essay-bot@users.noreply.github.com"
+          if [ -f history.json ]; then
+            git add history.json
+            git diff --staged --quiet || git commit -m "记录本周素材人物（$(date -u +%Y-%m-%d)）"
+            git push || echo "推送历史失败（不影响本次素材）"
+          else
+            echo "没有 history.json，跳过"
+          fi
