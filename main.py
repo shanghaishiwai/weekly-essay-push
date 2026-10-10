@@ -478,6 +478,7 @@ def pick_figure(api_key: str, model: str, ban_list: str, rot: dict) -> dict:
         log("   ⚠️ 第一阶段返回格式异常，改用纯文本模式兜底")
         return {"picked": None, "field": "", "topic": "", "candidates": [], "raw": content}
 
+    data["topic"] = normalize_topic(data.get("topic", ""))
     cands = data.get("candidates") or []
     log(f"   候选 {len(cands)} 位，选中：{data.get('picked')}"
         f"（领域：{data.get('field')}｜题材：{data.get('topic')}）")
@@ -511,6 +512,29 @@ def extract_name_from_card(card: str) -> str:
     if m:
         return m.group(1)
     return ""
+
+
+def normalize_topic(topic: str) -> str:
+    """把模型返回的冗长题材描述压成 1-2 个简洁关键词，供轮换统计使用。"""
+    if not topic:
+        return ""
+    t = topic.strip()
+    # 先截掉括号及之后的内容
+    t = re.split(r"[（(]", t)[0]
+    # 再按标点切分，取前两个片段
+    parts = [x.strip() for x in re.split(r"[，,、；;／/|]", t) if x.strip()]
+    if not parts:
+        return ""
+    picked = []
+    for x in parts:
+        x = x.strip("。.　 ")
+        if x and len(x) <= 14 and x not in picked:
+            picked.append(x)
+        if len(picked) >= 2:
+            break
+    if not picked:
+        picked = [parts[0][:14]]
+    return "、".join(picked)
 
 
 def is_duplicate(name: str, history: list) -> bool:
@@ -664,7 +688,7 @@ def main() -> None:
         picked = pick_figure(api_key, model, ban_list, rot)
         name = (picked.get("picked") or "").strip() or "（见正文）"
         field = (picked.get("field") or "").strip() or "未标注"
-        topic = (picked.get("topic") or "").strip()
+        topic = normalize_topic(picked.get("topic") or "")
 
         new_card = write_card(api_key, model, name, field)
 
