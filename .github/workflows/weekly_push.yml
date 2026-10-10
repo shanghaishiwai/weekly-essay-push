@@ -6,8 +6,6 @@ on:
     - cron: "20 12 * * 5"
   # 允许手动触发，用于测试（不用等周五）
   workflow_dispatch:
-  repository_dispatch:
-    types: [run-essay-now]
 
 # 需要写权限：每次生成后要把用过的人物记进 history.json，实现"反重复"
 permissions:
